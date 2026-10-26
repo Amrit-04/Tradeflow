@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'tradeflow-gateway'
+    static_configs:
+      - targets: ['host.docker.internal:2112']
+
+  - job_name: 'tradeflow-risk'
+    static_configs:
+      - targets: ['host.docker.internal:2113']
+
+  - job_name: 'tradeflow-oms'
+    static_configs:
+      - targets: ['host.docker.internal:2114']
+
+  - job_name: 'tradeflow-position'
+    static_configs:
+      - targets: ['host.docker.internal:2115']

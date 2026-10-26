@@ -1,0 +1,37 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts & coverage
+*.out
+*.test
+coverage.txt
+
+# Environment & local credentials
+.env
+.env.local
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Data volumes
+pgdata/
+redisdata/
+kafkadata/
+promdata/
+grafanadata/
