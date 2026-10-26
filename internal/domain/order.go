@@ -71,7 +71,7 @@ func NewOrder(
 		CumQty:    0,
 		LeavesQty: qty,
 		AvgPrice:  0,
-		Version:   1,
+		Version:   0,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}, nil
