@@ -2,8 +2,8 @@
 ### Institutional Equity Trade Lifecycle & Pre-Trade Risk Engine
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-00ADD8?style=flat&logo=go)](https://golang.org)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen?style=flat)]()
-[![Tests](https://img.shields.io/badge/Tests-16%20Passed%20(100%25)-success?style=flat)]()
+[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen?style=flat)](#testing-and-verification)
+[![Tests](https://img.shields.io/badge/Tests-16%20Passed%20(100%25)-success?style=flat)](#testing-and-verification)
 [![Property Tests](https://img.shields.io/badge/Property%20Testing-Rapid%20Verified-blueviolet?style=flat)](https://github.com/pgregory/rapid)
 [![Architecture](https://img.shields.io/badge/Architecture-Event%20Sourced%20%2B%20Outbox-orange?style=flat)]()
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat)]()
