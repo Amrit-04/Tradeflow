@@ -3,6 +3,8 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Common domain errors
@@ -67,6 +69,52 @@ func (p Price) ToDollars() float64 {
 // DollarsToPrice converts a dollar float to integer cents.
 func DollarsToPrice(d float64) Price {
 	return Price(int64(d*100.0 + 0.5))
+}
+
+// ParsePriceString parses a decimal price string (e.g. "150.25", "150.5", "150") directly into
+// integer cents (minor units) without IEEE-754 binary floating-point math.
+func ParsePriceString(s string) (Price, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, errors.New("empty price string")
+	}
+
+	parts := strings.Split(s, ".")
+	if len(parts) > 2 {
+		return 0, fmt.Errorf("invalid price format: %s", s)
+	}
+
+	var whole int64 = 0
+	if parts[0] != "" {
+		w, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid whole part: %w", err)
+		}
+		if w < 0 {
+			return 0, errors.New("negative price not supported")
+		}
+		whole = w
+	}
+
+	var frac int64 = 0
+	if len(parts) == 2 {
+		fStr := parts[1]
+		if len(fStr) == 1 {
+			d, err := strconv.ParseInt(fStr, 10, 64)
+			if err != nil {
+				return 0, err
+			}
+			frac = d * 10
+		} else if len(fStr) >= 2 {
+			d, err := strconv.ParseInt(fStr[:2], 10, 64)
+			if err != nil {
+				return 0, err
+			}
+			frac = d
+		}
+	}
+
+	return Price(whole*100 + frac), nil
 }
 
 func (p Price) String() string {

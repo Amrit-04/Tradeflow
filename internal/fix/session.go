@@ -83,7 +83,7 @@ func (s *Session) ProcessInbound(raw []byte, onOrder func(events.OrderInboundPay
 		symbol := msg.Get(TagSymbol)
 		sideStr := msg.Get(TagSide)
 		qtyVal, _ := msg.GetInt(TagOrderQty)
-		pxFloat, _ := msg.GetFloat(TagPrice)
+		priceCents, _ := msg.GetPrice(TagPrice)
 		account := msg.Get(TagAccount)
 		if account == "" {
 			account = "DEFAULT_ACCT"
@@ -104,7 +104,7 @@ func (s *Session) ProcessInbound(raw []byte, onOrder func(events.OrderInboundPay
 			Side:      side,
 			OrderType: domain.OrderTypeLimit,
 			OrderQty:  domain.Qty(qtyVal),
-			Price:     domain.DollarsToPrice(pxFloat),
+			Price:     priceCents,
 			Timestamp: time.Now().UTC(),
 		}
 
@@ -132,7 +132,7 @@ func (s *Session) ProcessInbound(raw []byte, onOrder func(events.OrderInboundPay
 		ack.Set(TagSymbol, symbol)
 		ack.Set(TagSide, sideStr)
 		ack.Set(TagOrderQty, fmt.Sprintf("%d", qtyVal))
-		ack.Set(TagPrice, fmt.Sprintf("%.2f", pxFloat))
+		ack.Set(TagPrice, fmt.Sprintf("%d.%02d", priceCents/100, priceCents%100))
 		ack.Set(TagCumQty, "0")
 		ack.Set(TagLeavesQty, fmt.Sprintf("%d", qtyVal))
 		ack.Set(TagAvgPx, "0.00")

@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"tradeflow/internal/domain"
 )
 
 const SOH = '\x01'
@@ -95,6 +97,14 @@ func (m *Message) GetInt(tag int) (int64, error) {
 		return 0, fmt.Errorf("tag %d not found", tag)
 	}
 	return strconv.ParseInt(v, 10, 64)
+}
+
+func (m *Message) GetPrice(tag int) (domain.Price, error) {
+	v, ok := m.tags[tag]
+	if !ok {
+		return 0, fmt.Errorf("tag %d not found", tag)
+	}
+	return domain.ParsePriceString(v)
 }
 
 func (m *Message) GetFloat(tag int) (float64, error) {

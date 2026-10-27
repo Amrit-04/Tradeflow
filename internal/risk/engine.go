@@ -3,7 +3,6 @@ package risk
 import (
 	"context"
 	"fmt"
-	"math"
 
 	"tradeflow/internal/domain"
 	"tradeflow/internal/events"
@@ -70,17 +69,22 @@ func (e *Engine) Evaluate(ctx context.Context, order events.OrderInboundPayload)
 		}
 	}
 
-	// 5. Check RC03: Fat-Finger Price Band (+/- X% of last mark price)
+	// 5. Check RC03: Fat-Finger Price Band (Pure integer basis-point math)
 	lastPrice, err := e.store.GetLastPrice(ctx, order.Symbol)
-	if err == nil && lastPrice > 0 {
-		diff := math.Abs(float64(order.Price - lastPrice))
-		threshold := float64(lastPrice) * e.limits.PriceBandPercent
-		if diff > threshold {
+	if err == nil && lastPrice > 0 && e.limits.PriceBandBps > 0 {
+		var diff int64
+		if order.Price > lastPrice {
+			diff = int64(order.Price - lastPrice)
+		} else {
+			diff = int64(lastPrice - order.Price)
+		}
+		// Integer comparison: diff / lastPrice > bps / 10000 <=> diff * 10000 > lastPrice * bps
+		if diff*10000 > int64(lastPrice)*e.limits.PriceBandBps {
 			return CheckResult{
 				Allowed:    false,
 				RejectCode: RejectCodePriceBand,
-				Reason: fmt.Sprintf("Price %s deviates by more than %.1f%% from last price %s",
-					order.Price, e.limits.PriceBandPercent*100, lastPrice),
+				Reason: fmt.Sprintf("Price %s deviates by more than %.1f%% (%d bps) from last price %s",
+					order.Price, float64(e.limits.PriceBandBps)/100.0, e.limits.PriceBandBps, lastPrice),
 			}
 		}
 	}

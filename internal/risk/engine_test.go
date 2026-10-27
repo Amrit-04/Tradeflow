@@ -17,7 +17,7 @@ func TestRiskChecksIndividual(t *testing.T) {
 	limits := risk.DefaultLimits()
 	limits.MaxOrderQty = 1000
 	limits.MaxOrderNotional = 15000000 // $150,000 in cents
-	limits.PriceBandPercent = 0.05     // 5%
+	limits.PriceBandBps = 500         // 500 bps = 5%
 	limits.MaxAccountPosition = 2000
 	limits.MaxDailyNotional = 20000000 // $200,000
 
