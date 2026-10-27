@@ -18,6 +18,10 @@ type Session struct {
 	OutSeqNum    int64
 	IsLoggedOn   bool
 	LastActivity time.Time
+
+	// Handlers for Order Lifecycle Actions
+	OnCancel  func(orderID string, origClOrdID string, clOrdID string) error
+	OnReplace func(orderID string, origClOrdID string, clOrdID string, newQty domain.Qty, newPrice domain.Price) error
 }
 
 func NewSession(senderCompID string, targetCompID string) *Session {
@@ -137,6 +141,88 @@ func (s *Session) ProcessInbound(raw []byte, onOrder func(events.OrderInboundPay
 		ack.Set(TagLeavesQty, fmt.Sprintf("%d", qtyVal))
 		ack.Set(TagAvgPx, "0.00")
 		return ack, nil
+
+	case MsgTypeOrderCancelRequest:
+		clOrdID := msg.Get(TagClOrdID)
+		origClOrdID := msg.Get(TagOrigClOrdID)
+		orderID := msg.Get(TagOrderID)
+		if orderID == "" {
+			orderID = "ORD-" + origClOrdID
+		}
+
+		if s.OnCancel != nil {
+			if err := s.OnCancel(orderID, origClOrdID, clOrdID); err != nil {
+				rej := s.NextOutMsg(MsgTypeOrderCancelReject)
+				rej.Set(TagOrderID, orderID)
+				rej.Set(TagClOrdID, clOrdID)
+				rej.Set(TagOrigClOrdID, origClOrdID)
+				rej.Set(TagOrdStatus, "8")         // Rejected
+				rej.Set(TagCxlRejReason, "1")      // Unknown order / Too late to cancel
+				rej.Set(TagCxlRejResponseTo, "1") // Order Cancel Request
+				rej.Set(TagText, err.Error())
+				return rej, nil
+			}
+		}
+
+		// Acknowledge cancel: ExecutionReport (ExecType=4 Cancelled, OrdStatus=4 Cancelled)
+		ack := s.NextOutMsg(MsgTypeExecutionReport)
+		ack.Set(TagOrderID, orderID)
+		ack.Set(TagClOrdID, clOrdID)
+		ack.Set(TagOrigClOrdID, origClOrdID)
+		ack.Set(TagExecID, fmt.Sprintf("EX-CXL-%d", time.Now().UnixNano()))
+		ack.Set(TagExecType, "4") // Cancelled
+		ack.Set(TagOrdStatus, "4") // Cancelled
+		ack.Set(TagSymbol, msg.Get(TagSymbol))
+		ack.Set(TagSide, msg.Get(TagSide))
+		ack.Set(TagLeavesQty, "0")
+		return ack, nil
+
+	case MsgTypeOrderCancelReplaceRequest:
+		clOrdID := msg.Get(TagClOrdID)
+		origClOrdID := msg.Get(TagOrigClOrdID)
+		orderID := msg.Get(TagOrderID)
+		if orderID == "" {
+			orderID = "ORD-" + origClOrdID
+		}
+		qtyVal, _ := msg.GetInt(TagOrderQty)
+		priceCents, _ := msg.GetPrice(TagPrice)
+
+		if s.OnReplace != nil {
+			if err := s.OnReplace(orderID, origClOrdID, clOrdID, domain.Qty(qtyVal), priceCents); err != nil {
+				rej := s.NextOutMsg(MsgTypeOrderCancelReject)
+				rej.Set(TagOrderID, orderID)
+				rej.Set(TagClOrdID, clOrdID)
+				rej.Set(TagOrigClOrdID, origClOrdID)
+				rej.Set(TagOrdStatus, "8")         // Rejected
+				rej.Set(TagCxlRejReason, "2")      // Broker option
+				rej.Set(TagCxlRejResponseTo, "2") // Order Cancel/Replace Request
+				rej.Set(TagText, err.Error())
+				return rej, nil
+			}
+		}
+
+		// Acknowledge replace: ExecutionReport (ExecType=5 Replaced, OrdStatus=5 Replaced)
+		ack := s.NextOutMsg(MsgTypeExecutionReport)
+		ack.Set(TagOrderID, orderID)
+		ack.Set(TagClOrdID, clOrdID)
+		ack.Set(TagOrigClOrdID, origClOrdID)
+		ack.Set(TagExecID, fmt.Sprintf("EX-REP-%d", time.Now().UnixNano()))
+		ack.Set(TagExecType, "5") // Replaced
+		ack.Set(TagOrdStatus, "5") // Replaced
+		ack.Set(TagSymbol, msg.Get(TagSymbol))
+		ack.Set(TagSide, msg.Get(TagSide))
+		ack.Set(TagOrderQty, fmt.Sprintf("%d", qtyVal))
+		ack.Set(TagPrice, fmt.Sprintf("%d.%02d", priceCents/100, priceCents%100))
+		ack.Set(TagLeavesQty, fmt.Sprintf("%d", qtyVal))
+		return ack, nil
+
+	case MsgTypeResendRequest:
+		// Architectural Design Note:
+		// Sequence-resend (MsgType 2) is explicitly NOT supported.
+		// Event sourcing and Kafka topic replay handle message recovery.
+		rej := s.NextOutMsg(MsgTypeReject)
+		rej.Set(TagText, "Sequence resend not supported: session reset required")
+		return rej, nil
 
 	default:
 		return nil, nil

@@ -165,3 +165,40 @@ func TestOverfillPrevention(t *testing.T) {
 		t.Fatalf("expected ErrOverfill, got %v", err)
 	}
 }
+
+func TestReplaceLifecycle(t *testing.T) {
+	ord := createTestOrder(t, 500, 20000)
+
+	// Risk Passed -> New
+	_, _ = statemachine.ApplyTransition(ord, statemachine.TriggerRiskPassed, nil)
+
+	// In-flight replace request
+	res, err := statemachine.ApplyTransition(ord, statemachine.TriggerReplaceRequest, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on ReplaceRequest: %v", err)
+	}
+	if ord.State != domain.StatePendingReplace {
+		t.Fatalf("expected state PendingReplace, got %s", ord.State)
+	}
+
+	// Case 1: Replace Reject reverts to StateNew
+	res, err = statemachine.ApplyTransition(ord, statemachine.TriggerReplaceReject, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on ReplaceReject: %v", err)
+	}
+	if ord.State != domain.StateNew {
+		t.Fatalf("expected state New after replace reject, got %s", ord.State)
+	}
+
+	// In-flight replace request again
+	_, _ = statemachine.ApplyTransition(ord, statemachine.TriggerReplaceRequest, nil)
+
+	// Case 2: Replace Ack -> Replaced
+	res, err = statemachine.ApplyTransition(ord, statemachine.TriggerReplaceAck, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on ReplaceAck: %v", err)
+	}
+	if ord.State != domain.StateReplaced || res.NewState != domain.StateReplaced {
+		t.Fatalf("expected state Replaced, got %s", ord.State)
+	}
+}

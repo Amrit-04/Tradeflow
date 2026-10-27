@@ -27,6 +27,7 @@ const (
 	TagOrderID        = 37
 	TagOrderQty       = 38
 	TagOrdStatus      = 39
+	TagOrigClOrdID    = 41
 	TagPrice          = 44
 	TagSenderCompID   = 49
 	TagSendingTime    = 52
@@ -34,9 +35,11 @@ const (
 	TagSymbol         = 55
 	TagTargetCompID   = 56
 	TagText           = 58
+	TagCxlRejReason   = 102
 	TagHeartBtInt     = 108
 	TagExecType       = 150
 	TagLeavesQty      = 151
+	TagCxlRejResponseTo = 434
 )
 
 // MsgType constants
