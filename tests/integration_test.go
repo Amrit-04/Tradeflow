@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
@@ -355,5 +357,145 @@ func TestRealIdempotency(t *testing.T) {
 	trades, _ := repo.GetTrades(ctx, "REAL_CHAOS_ACCT", "AAPL")
 	if len(trades) != numUniqueFills {
 		t.Fatalf("expected %d trades in postgres, got %d", numUniqueFills, len(trades))
+	}
+}
+
+// TestRealKafkaOutboxBrokerRestart asserts end-to-end outbox durability and recovery
+// against real PostgreSQL and Apache Kafka across a container stop/pause and restart.
+func TestRealKafkaOutboxBrokerRestart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	repo, cleanup := setupTestPostgres(ctx, t)
+	defer cleanup()
+
+	kafkaBrokers := []string{"localhost:9092"}
+	if envBrokers := os.Getenv("KAFKA_BROKERS"); envBrokers != "" {
+		kafkaBrokers = []string{envBrokers}
+	}
+
+	kBus := bus.NewKafkaBus(kafkaBrokers)
+	defer kBus.Close()
+
+	topic := events.TopicOrdersRouted
+	received := make(map[string]int)
+
+	// 1. Stage 6 orders with outbox records in PostgreSQL
+	const totalOrders = 6
+	for i := 1; i <= totalOrders; i++ {
+		orderID := fmt.Sprintf("KAFKA-ORD-%d-%03d", time.Now().UnixNano(), i)
+		event := storage.OrderEventRecord{
+			OrderID:   orderID,
+			Seq:       1,
+			EventType: "ORDER_ROUTED",
+			Payload:   json.RawMessage(`{}`),
+			CreatedAt: time.Now().UTC(),
+		}
+		order := storage.OrderRecord{
+			OrderID:   orderID,
+			ClOrdID:   fmt.Sprintf("KAFKA-CL-%03d", i),
+			Account:   "KAFKA_ACCT",
+			Symbol:    "AAPL",
+			Side:      domain.SideBuy,
+			OrderQty:  100,
+			Price:     15000,
+			State:     domain.StateNew,
+			LeavesQty: 100,
+			Version:   1,
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		}
+		payloadBytes, _ := json.Marshal(map[string]string{"order_id": orderID})
+		outboxRec := &storage.OutboxRecord{
+			OutboxID:     uuid.New().String(),
+			Topic:        topic,
+			PartitionKey: orderID,
+			Payload:      payloadBytes,
+			CreatedAt:    time.Now().UTC(),
+		}
+		if err := repo.SaveOrderEventAndProject(ctx, event, order, outboxRec); err != nil {
+			t.Fatalf("failed to stage outbox record: %v", err)
+		}
+	}
+
+	// 2. Publish initial 2 records by draining batch of 2
+	publisher := outbox.NewPublisher(repo, kBus, 50*time.Millisecond, 2)
+	count := publisher.DrainBatch(ctx)
+	if count != 2 {
+		t.Fatalf("expected 2 published messages in first batch, got %d", count)
+	}
+
+	// 3. Stop / Pause the Kafka broker container to inject network/broker outage
+	containerName := "tradeflow-kafka"
+	if err := exec.Command("docker", "pause", containerName).Run(); err != nil {
+		t.Logf("skipping container pause if docker CLI unavailable: %v", err)
+	} else {
+		t.Log("[Integration] Kafka container PAUSED. Attempting outbox drain during outage...")
+
+		// Attempt to drain remaining outbox messages during outage with short timeout
+		outageCtx, outageCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		_ = publisher.DrainBatch(outageCtx)
+		outageCancel()
+
+		// Verify unpublished rows remain intact in PostgreSQL
+		unpublished, err := repo.GetUnpublishedOutbox(ctx, 100)
+		if err != nil {
+			t.Fatalf("failed to query unpublished outbox: %v", err)
+		}
+		if len(unpublished) < 4 {
+			t.Fatalf("expected at least 4 unpublished outbox rows preserved during outage, got %d", len(unpublished))
+		}
+		t.Logf("[Integration] Preserved %d unpublished outbox rows safely in PostgreSQL during broker failure.", len(unpublished))
+
+		// 4. Recover the Kafka broker container
+		t.Log("[Integration] Unpausing Kafka container to simulate broker recovery...")
+		if err := exec.Command("docker", "unpause", containerName).Run(); err != nil {
+			t.Fatalf("failed to unpause kafka container: %v", err)
+		}
+		time.Sleep(2 * time.Second) // wait for Kafka readiness
+	}
+
+	// 5. Drain the recovered outbox
+	recoveredPublisher := outbox.NewPublisher(repo, kBus, 50*time.Millisecond, 10)
+	for i := 0; i < 10; i++ {
+		_ = recoveredPublisher.DrainBatch(ctx)
+		unpub, _ := repo.GetUnpublishedOutbox(ctx, 100)
+		if len(unpub) == 0 {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	unpub, err := repo.GetUnpublishedOutbox(ctx, 100)
+	if err != nil || len(unpub) != 0 {
+		t.Fatalf("expected 0 unpublished outbox records after broker recovery, got %d", len(unpub))
+	}
+
+	// 6. Read and assert all 6 messages directly from Kafka topic from offset 0
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:     kafkaBrokers,
+		Topic:       topic,
+		StartOffset: kafka.FirstOffset,
+		MinBytes:    1,
+		MaxBytes:    10e6,
+	})
+	defer reader.Close()
+
+	readCtx, readCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer readCancel()
+
+	for len(received) < totalOrders {
+		m, err := reader.ReadMessage(readCtx)
+		if err != nil {
+			t.Fatalf("failed reading from kafka topic %s: %v", topic, err)
+		}
+		var msg map[string]string
+		if err := json.Unmarshal(m.Value, &msg); err == nil {
+			received[msg["order_id"]]++
+		}
+	}
+
+	if len(received) != totalOrders {
+		t.Fatalf("expected %d unique orders received from Kafka, got %d", totalOrders, len(received))
 	}
 }
