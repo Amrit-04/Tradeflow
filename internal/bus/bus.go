@@ -127,12 +127,16 @@ func (k *KafkaBus) getWriter(topic string) *kafka.Writer {
 		return w
 	}
 	w := &kafka.Writer{
-		Addr:         kafka.TCP(k.brokers...),
-		Topic:        topic,
-		Balancer:     &kafka.Hash{},
-		BatchSize:    100,
-		BatchTimeout: 10 * time.Millisecond,
-		RequiredAcks: kafka.RequireAll,
+		Addr:                   kafka.TCP(k.brokers...),
+		Topic:                  topic,
+		Balancer:               &kafka.Hash{},
+		BatchSize:              100,
+		BatchTimeout:           10 * time.Millisecond,
+		RequiredAcks:           kafka.RequireAll,
+		AllowAutoTopicCreation: true,
+		MaxAttempts:            10,
+		WriteBackoffMin:        50 * time.Millisecond,
+		WriteBackoffMax:        500 * time.Millisecond,
 	}
 	k.writers[topic] = w
 	return w
@@ -155,6 +159,7 @@ func (k *KafkaBus) Subscribe(ctx context.Context, topic string, groupID string, 
 		MinBytes:       1,
 		MaxBytes:       10e6, // 10MB
 		CommitInterval: time.Second,
+		StartOffset:    kafka.FirstOffset,
 	})
 
 	go func() {

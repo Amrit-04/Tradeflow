@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"tradeflow/internal/domain"
 	"tradeflow/internal/events"
 	"tradeflow/internal/statemachine"
@@ -73,7 +75,7 @@ func (s *Service) HandleAcceptedOrder(ctx context.Context, p events.OrderInbound
 	})
 
 	outboxRecord := &storage.OutboxRecord{
-		OutboxID:     fmt.Sprintf("OUT-%s-1", order.OrderID),
+		OutboxID:     uuid.New().String(),
 		Topic:        events.TopicOrdersRouted,
 		PartitionKey: order.OrderID,
 		Payload:      routedPayload,

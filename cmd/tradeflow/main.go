@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 
 	"tradeflow/internal/bus"
 	"tradeflow/internal/events"
@@ -40,11 +41,54 @@ func main() {
 		_ = http.ListenAndServe(":2112", nil)
 	}()
 
-	// 2. Storage & Event Bus Initialization
-	var repo storage.Repository = storage.NewMemoryRepository()
-	var riskStore risk.RiskStateStore = risk.NewMemoryRiskStore()
-	var msgBus bus.Bus = bus.NewMemoryBus()
-	defer msgBus.Close()
+	// 2. Storage & Event Bus Initialization (Real Infrastructure vs Memory fallback)
+	useRealInfra := os.Getenv("USE_REAL_INFRA") == "true"
+	var repo storage.Repository
+	var riskStore risk.RiskStateStore
+	var msgBus bus.Bus
+
+	if useRealInfra {
+		log.Println("[Tradeflow] USE_REAL_INFRA=true: Connecting to PostgreSQL, Redis, and Kafka...")
+
+		pgURL := os.Getenv("POSTGRES_URL")
+		if pgURL == "" {
+			pgURL = "postgres://tradeflow:tradeflow_password@localhost:5432/tradeflow?sslmode=disable"
+		}
+		pgRepo, err := storage.NewPostgresRepository(ctx, pgURL)
+		if err != nil {
+			log.Fatalf("failed to connect to PostgreSQL at %s: %v", pgURL, err)
+		}
+		defer pgRepo.Close()
+		repo = pgRepo
+
+		redisAddr := os.Getenv("REDIS_ADDR")
+		if redisAddr == "" {
+			redisAddr = "localhost:6379"
+		}
+		rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			log.Fatalf("failed to connect to Redis at %s: %v", redisAddr, err)
+		}
+		defer rdb.Close()
+		riskStore = risk.NewRedisRiskStore(rdb)
+
+		kafkaBrokers := []string{"localhost:9092"}
+		if envBrokers := os.Getenv("KAFKA_BROKERS"); envBrokers != "" {
+			kafkaBrokers = []string{envBrokers}
+		}
+		kBus := bus.NewKafkaBus(kafkaBrokers)
+		defer kBus.Close()
+		msgBus = kBus
+
+		log.Println("[Tradeflow] Successfully wired real PostgreSQL, Redis (Lua), and Kafka!")
+	} else {
+		log.Println("[Tradeflow] Running with fast in-memory engine (set USE_REAL_INFRA=true for live backends).")
+		repo = storage.NewMemoryRepository()
+		riskStore = risk.NewMemoryRiskStore()
+		mBus := bus.NewMemoryBus()
+		defer mBus.Close()
+		msgBus = mBus
+	}
 
 	// Seed reference market prices
 	_ = riskStore.SetLastPrice(ctx, "AAPL", 15000)  // $150.00
@@ -81,10 +125,16 @@ func main() {
 	_ = msgBus.Subscribe(ctx, events.TopicOrdersAccepted, "oms_group", func(ctx context.Context, key string, payload []byte) error {
 		var inbound events.OrderInboundPayload
 		if err := json.Unmarshal(payload, &inbound); err != nil {
+			log.Printf("[OMS] Unmarshal error: %v", err)
 			return err
 		}
+		log.Printf("[OMS] Received accepted order: %s", inbound.OrderID)
 		metrics.AcceptedOrdersTotal.Inc()
-		return omsService.HandleAcceptedOrder(ctx, inbound)
+		err := omsService.HandleAcceptedOrder(ctx, inbound)
+		if err != nil {
+			log.Printf("[OMS] HandleAcceptedOrder error for %s: %v", inbound.OrderID, err)
+		}
+		return err
 	})
 
 	// B. Subscribe OMS to orders.rejected
@@ -136,6 +186,10 @@ func main() {
 	_, _ = fixSession.ProcessInbound(logonMsg.Serialize(), nil)
 	fmt.Printf("[FIX Gateway] Session established: %s <-> %s\n\n", fixSession.SenderCompID, fixSession.TargetCompID)
 
+	if useRealInfra {
+		time.Sleep(1500 * time.Millisecond) // Allow Kafka consumer groups to stabilize partition assignments
+	}
+
 	// 7. Inject Test Order Batch
 	ordersToSubmit := []struct {
 		name    string
@@ -185,7 +239,9 @@ func main() {
 
 			// Approved
 			bytes, _ := json.Marshal(p)
-			_ = msgBus.Publish(ctx, events.TopicOrdersAccepted, p.OrderID, bytes)
+			if err := msgBus.Publish(ctx, events.TopicOrdersAccepted, p.OrderID, bytes); err != nil {
+				log.Printf("[Publish Error] Topic %s Key %s: %v", events.TopicOrdersAccepted, p.OrderID, err)
+			}
 			return nil
 		})
 
@@ -201,7 +257,18 @@ func main() {
 	}
 
 	// 8. Wait for asynchronous outbox drain and executions to complete
-	time.Sleep(300 * time.Millisecond)
+	if useRealInfra {
+		log.Println("[Tradeflow] Waiting for Kafka pipeline and asynchronous workers to drain...")
+		for i := 0; i < 20; i++ {
+			trades, _ := repo.GetAllTrades(ctx)
+			if len(trades) >= 7 {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+	} else {
+		time.Sleep(300 * time.Millisecond)
+	}
 
 	// 9. Print Operational Audit Report
 	fmt.Println("\n=====================================================================")
