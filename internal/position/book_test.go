@@ -203,3 +203,62 @@ func TestFillBeforeOrderResilience(t *testing.T) {
 		t.Fatalf("expected resolved NetQty=50, AvgCost=17500, got NetQty=%d, AvgCost=%d", pos.NetQty, pos.AvgCost)
 	}
 }
+
+func TestPendingFillsTTLAndOrphanAlert(t *testing.T) {
+	ctx := context.Background()
+	repo := storage.NewMemoryRepository()
+	book := position.NewBook(repo)
+
+	// Stage an orphaned fill from 1 hour ago
+	oldTimestamp := time.Now().UTC().Add(-1 * time.Hour)
+	orphanedFill := storage.PendingFillRecord{
+		PendingID:  "PEND-ORPHAN-001",
+		Venue:      "SIM_VENUE",
+		ExecID:     "EXEC-ORPHAN-001",
+		OrderID:    "ORD-NONEXISTENT",
+		Payload:    json.RawMessage(`{}`),
+		RetryCount: 0,
+		Status:     "PENDING",
+		CreatedAt:  oldTimestamp,
+	}
+
+	inserted, err := repo.SavePendingFill(ctx, orphanedFill)
+	if err != nil || !inserted {
+		t.Fatalf("failed to stage orphaned fill: %v", err)
+	}
+
+	// Stage a fresh fill from 1 second ago (within TTL)
+	freshFill := storage.PendingFillRecord{
+		PendingID:  "PEND-FRESH-001",
+		Venue:      "SIM_VENUE",
+		ExecID:     "EXEC-FRESH-001",
+		OrderID:    "ORD-FRESH",
+		Payload:    json.RawMessage(`{}`),
+		RetryCount: 0,
+		Status:     "PENDING",
+		CreatedAt:  time.Now().UTC(),
+	}
+	_, _ = repo.SavePendingFill(ctx, freshFill)
+
+	// Run TTL sweep with 30s TTL
+	ttl := 30 * time.Second
+	expiredCount, err := book.SweepExpiredPendingFills(ctx, ttl)
+	if err != nil {
+		t.Fatalf("sweep error: %v", err)
+	}
+	if expiredCount != 1 {
+		t.Fatalf("expected exactly 1 expired orphaned fill, got %d", expiredCount)
+	}
+
+	// Verify the orphaned fill is marked EXPIRED and cannot be queried as PENDING
+	pendingList, _ := repo.GetPendingFillsByOrder(ctx, "ORD-NONEXISTENT")
+	if len(pendingList) != 0 {
+		t.Fatalf("expected 0 pending fills for ORD-NONEXISTENT, got %d", len(pendingList))
+	}
+
+	// Verify the fresh fill remains PENDING
+	freshList, _ := repo.GetPendingFillsByOrder(ctx, "ORD-FRESH")
+	if len(freshList) != 1 {
+		t.Fatalf("expected 1 fresh pending fill preserved, got %d", len(freshList))
+	}
+}

@@ -16,6 +16,7 @@ type MemoryRepository struct {
 	eventSeqs    map[string]bool               // key: order_id + ":" + seq (unique constraint)
 	orders       map[string]OrderRecord        // key: order_id
 	trades       map[string]TradeRecord        // key: trade_id
+	tradeList    []TradeRecord
 	venueExecIDs map[string]bool               // key: venue + ":" + exec_id (unique constraint)
 	positions    map[string]PositionRecord     // key: account + ":" + symbol
 	outbox       []OutboxRecord
@@ -95,6 +96,7 @@ func (m *MemoryRepository) SaveTrade(_ context.Context, trade TradeRecord) (bool
 
 	m.venueExecIDs[key] = true
 	m.trades[trade.TradeID] = trade
+	m.tradeList = append(m.tradeList, trade)
 	return true, nil
 }
 
@@ -103,12 +105,15 @@ func (m *MemoryRepository) GetTrades(_ context.Context, account string, symbol s
 	defer m.mu.RUnlock()
 
 	var result []TradeRecord
-	for _, t := range m.trades {
+	for _, t := range m.tradeList {
 		if t.Account == account && t.Symbol == symbol {
 			result = append(result, t)
 		}
 	}
-	sort.Slice(result, func(i, j int) bool {
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].TransactTime.Equal(result[j].TransactTime) {
+			return false // Preserves insertion order
+		}
 		return result[i].TransactTime.Before(result[j].TransactTime)
 	})
 	return result, nil
@@ -118,10 +123,8 @@ func (m *MemoryRepository) GetAllTrades(_ context.Context) ([]TradeRecord, error
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	result := make([]TradeRecord, 0, len(m.trades))
-	for _, t := range m.trades {
-		result = append(result, t)
-	}
+	result := make([]TradeRecord, len(m.tradeList))
+	copy(result, m.tradeList)
 	return result, nil
 }
 
@@ -212,6 +215,19 @@ func (m *MemoryRepository) GetPendingFillsByOrder(_ context.Context, orderID str
 	return result, nil
 }
 
+func (m *MemoryRepository) GetExpiredPendingFills(_ context.Context, olderThan time.Time) ([]PendingFillRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []PendingFillRecord
+	for _, pf := range m.pendingFills {
+		if pf.Status == "PENDING" && pf.CreatedAt.Before(olderThan) {
+			result = append(result, pf)
+		}
+	}
+	return result, nil
+}
+
 func (m *MemoryRepository) MarkPendingFillProcessed(_ context.Context, pendingID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -219,6 +235,20 @@ func (m *MemoryRepository) MarkPendingFillProcessed(_ context.Context, pendingID
 	for k, pf := range m.pendingFills {
 		if pf.PendingID == pendingID {
 			pf.Status = "PROCESSED"
+			m.pendingFills[k] = pf
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *MemoryRepository) MarkPendingFillExpired(_ context.Context, pendingID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for k, pf := range m.pendingFills {
+		if pf.PendingID == pendingID {
+			pf.Status = "EXPIRED"
 			m.pendingFills[k] = pf
 			return nil
 		}

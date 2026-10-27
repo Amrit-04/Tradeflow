@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"tradeflow/internal/domain"
 	"tradeflow/internal/events"
+	"tradeflow/internal/metrics"
 	"tradeflow/internal/storage"
 )
 
@@ -57,7 +59,10 @@ func (b *Book) ProcessFill(ctx context.Context, fill events.ExecutionFillPayload
 			Status:    "PENDING",
 			CreatedAt: time.Now().UTC(),
 		}
-		_, saveErr := b.repo.SavePendingFill(ctx, pending)
+		inserted, saveErr := b.repo.SavePendingFill(ctx, pending)
+		if inserted {
+			metrics.PendingFillsCurrent.Inc()
+		}
 		return false, saveErr
 	}
 
@@ -195,9 +200,39 @@ func (b *Book) ResolvePendingFills(ctx context.Context, orderID string) (int, er
 		}
 		processed, err := b.ProcessFill(ctx, fill)
 		if err == nil && processed {
-			_ = b.repo.MarkPendingFillProcessed(ctx, p.PendingID)
-			resolvedCount++
+			if markErr := b.repo.MarkPendingFillProcessed(ctx, p.PendingID); markErr == nil {
+				metrics.PendingFillsCurrent.Dec()
+				metrics.PendingFillsResolvedTotal.Inc()
+				resolvedCount++
+			}
 		}
 	}
 	return resolvedCount, nil
+}
+
+// SweepExpiredPendingFills finds pending fills older than ttl, marks them EXPIRED,
+// decrements the pending gauge, and increments the orphaned alert metric.
+func (b *Book) SweepExpiredPendingFills(ctx context.Context, ttl time.Duration) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-ttl)
+	expiredList, err := b.repo.GetExpiredPendingFills(ctx, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query expired pending fills: %w", err)
+	}
+
+	expiredCount := 0
+	for _, p := range expiredList {
+		if err := b.repo.MarkPendingFillExpired(ctx, p.PendingID); err != nil {
+			log.Printf("[ALERT] Failed to mark expired pending fill %s: %v", p.PendingID, err)
+			continue
+		}
+		metrics.PendingFillsCurrent.Dec()
+		metrics.PendingFillsOrphanedTotal.Inc()
+		log.Printf("[CRITICAL ALERT] Orphaned execution fill detected! Venue=%s ExecID=%s OrderID=%s exceeded TTL %v without parent order arrival. Marked EXPIRED.",
+			p.Venue, p.ExecID, p.OrderID, ttl)
+		expiredCount++
+	}
+	return expiredCount, nil
 }

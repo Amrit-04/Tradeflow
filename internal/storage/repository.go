@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 var (
@@ -36,7 +37,9 @@ type Repository interface {
 	// Pending Fills (Staging for Early / Out-of-Order Execution Fills)
 	SavePendingFill(ctx context.Context, fill PendingFillRecord) (inserted bool, err error)
 	GetPendingFillsByOrder(ctx context.Context, orderID string) ([]PendingFillRecord, error)
+	GetExpiredPendingFills(ctx context.Context, olderThan time.Time) ([]PendingFillRecord, error)
 	MarkPendingFillProcessed(ctx context.Context, pendingID string) error
+	MarkPendingFillExpired(ctx context.Context, pendingID string) error
 
 	// Reconciliation Breaks
 	SaveBreak(ctx context.Context, b BreakRecord) error

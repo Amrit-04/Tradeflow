@@ -332,8 +332,39 @@ func (p *PostgresRepository) GetPendingFillsByOrder(ctx context.Context, orderID
 	return records, rows.Err()
 }
 
+func (p *PostgresRepository) GetExpiredPendingFills(ctx context.Context, olderThan time.Time) ([]PendingFillRecord, error) {
+	sql := `
+		SELECT pending_id, venue, exec_id, order_id, payload, retry_count, status, created_at, last_retry_at
+		FROM pending_fills WHERE status = 'PENDING' AND created_at < $1;
+	`
+	rows, err := p.pool.Query(ctx, sql, olderThan)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []PendingFillRecord
+	for rows.Next() {
+		var pf PendingFillRecord
+		if err := rows.Scan(
+			&pf.PendingID, &pf.Venue, &pf.ExecID, &pf.OrderID, &pf.Payload,
+			&pf.RetryCount, &pf.Status, &pf.CreatedAt, &pf.LastRetryAt,
+		); err != nil {
+			return nil, err
+		}
+		records = append(records, pf)
+	}
+	return records, rows.Err()
+}
+
 func (p *PostgresRepository) MarkPendingFillProcessed(ctx context.Context, pendingID string) error {
 	sql := `UPDATE pending_fills SET status = 'PROCESSED' WHERE pending_id = $1;`
+	_, err := p.pool.Exec(ctx, sql, pendingID)
+	return err
+}
+
+func (p *PostgresRepository) MarkPendingFillExpired(ctx context.Context, pendingID string) error {
+	sql := `UPDATE pending_fills SET status = 'EXPIRED' WHERE pending_id = $1;`
 	_, err := p.pool.Exec(ctx, sql, pendingID)
 	return err
 }

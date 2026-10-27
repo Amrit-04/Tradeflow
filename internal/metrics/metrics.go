@@ -36,4 +36,19 @@ var (
 		Help:    "Latency from FIX gateway receipt to order ack/reject execution report",
 		Buckets: []float64{0.0005, 0.001, 0.002, 0.005, 0.010, 0.025, 0.050, 0.100},
 	})
+
+	PendingFillsCurrent = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "tradeflow_pending_fills_current",
+		Help: "Current count of early fills parked in pending_fills waiting for parent orders",
+	})
+
+	PendingFillsResolvedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tradeflow_pending_fills_resolved_total",
+		Help: "Total count of pending early fills successfully resolved upon parent order arrival",
+	})
+
+	PendingFillsOrphanedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tradeflow_pending_fills_orphaned_total",
+		Help: "Total count of orphaned pending fills that exceeded TTL without parent order arriving (ALERT)",
+	})
 )
