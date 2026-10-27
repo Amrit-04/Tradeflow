@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -107,6 +108,9 @@ func (m *MemoryRepository) GetTrades(_ context.Context, account string, symbol s
 			result = append(result, t)
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].TransactTime.Before(result[j].TransactTime)
+	})
 	return result, nil
 }
 

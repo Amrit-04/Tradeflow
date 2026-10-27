@@ -85,95 +85,95 @@ func (b *Book) ProcessFill(ctx context.Context, fill events.ExecutionFillPayload
 		return false, nil
 	}
 
-	// 3. Update Position & P&L
-	pos, err := b.repo.GetPosition(ctx, fill.Account, fill.Symbol)
-	if err == storage.ErrPositionNotFound || pos == nil {
-		pos = &storage.PositionRecord{
-			Account:       fill.Account,
-			Symbol:        fill.Symbol,
-			NetQty:        0,
-			AvgCost:       0,
-			RealizedPnL:   0,
-			UnrealizedPnL: 0,
-			UpdatedAt:     time.Now().UTC(),
+	// 3. Update Position & P&L from deduplicated trades
+	trades, err := b.repo.GetTrades(ctx, fill.Account, fill.Symbol)
+	if err != nil {
+		return false, fmt.Errorf("failed to get trades: %w", err)
+	}
+
+	pos := storage.PositionRecord{
+		Account:   fill.Account,
+		Symbol:    fill.Symbol,
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	var netQty int64 = 0
+	var totalCost int64 = 0
+	var realizedPnL int64 = 0
+
+	for _, t := range trades {
+		tQty := int64(t.ExecQty)
+		tPrice := int64(t.ExecPrice)
+
+		if t.Side == domain.SideBuy {
+			if netQty >= 0 {
+				totalCost += tQty * tPrice
+				netQty += tQty
+			} else {
+				coveredQty := tQty
+				if coveredQty > -netQty {
+					coveredQty = -netQty
+				}
+				avgCost := totalCost / (-netQty)
+				realizedPnL += coveredQty * (avgCost - tPrice)
+				netQty += tQty
+				if netQty > 0 {
+					totalCost = netQty * tPrice
+				} else if netQty == 0 {
+					totalCost = 0
+				} else {
+					totalCost = (-netQty) * avgCost
+				}
+			}
+		} else {
+			if netQty <= 0 {
+				totalCost += tQty * tPrice
+				netQty -= tQty
+			} else {
+				soldQty := tQty
+				if soldQty > netQty {
+					soldQty = netQty
+				}
+				avgCost := totalCost / netQty
+				realizedPnL += soldQty * (tPrice - avgCost)
+				netQty -= tQty
+				if netQty < 0 {
+					totalCost = (-netQty) * tPrice
+				} else if netQty == 0 {
+					totalCost = 0
+				} else {
+					totalCost = netQty * avgCost
+				}
+			}
 		}
 	}
 
-	prevNetQty := int64(pos.NetQty)
-	fillQty := int64(fill.FillQty)
-	fillPrice := int64(fill.FillPrice) // Cents
-
-	if fill.Side == domain.SideBuy {
-		if prevNetQty >= 0 {
-			// Increasing long position: update VWAP
-			totalPrevCost := prevNetQty * int64(pos.AvgCost)
-			newNotional := fillQty * fillPrice
-			newNetQty := prevNetQty + fillQty
-			pos.NetQty = domain.Qty(newNetQty)
-			pos.AvgCost = domain.Price((totalPrevCost + newNotional) / newNetQty)
+	pos.NetQty = domain.Qty(netQty)
+	if netQty != 0 {
+		if netQty > 0 {
+			pos.AvgCost = domain.Price(totalCost / netQty)
 		} else {
-			// Covering short position: realize P&L
-			coveredQty := fillQty
-			if coveredQty > -prevNetQty {
-				coveredQty = -prevNetQty
-			}
-			// Short realized PnL = coveredQty * (AvgCost - fillPrice)
-			pnlDelta := coveredQty * (int64(pos.AvgCost) - fillPrice)
-			pos.RealizedPnL += pnlDelta
-			newNetQty := prevNetQty + fillQty
-			pos.NetQty = domain.Qty(newNetQty)
-			if newNetQty == 0 {
-				pos.AvgCost = 0
-			} else if newNetQty > 0 {
-				// Flipped long
-				pos.AvgCost = domain.Price(fillPrice)
-			}
+			pos.AvgCost = domain.Price(totalCost / (-netQty))
 		}
 	} else {
-		// Sell Side
-		if prevNetQty <= 0 {
-			// Increasing short position: update short VWAP
-			totalPrevCost := -prevNetQty * int64(pos.AvgCost)
-			newNotional := fillQty * fillPrice
-			newNetQty := prevNetQty - fillQty
-			pos.NetQty = domain.Qty(newNetQty)
-			pos.AvgCost = domain.Price((totalPrevCost + newNotional) / (-newNetQty))
-		} else {
-			// Selling from long: realize P&L
-			soldQty := fillQty
-			if soldQty > prevNetQty {
-				soldQty = prevNetQty
-			}
-			// Long realized PnL = soldQty * (fillPrice - AvgCost)
-			pnlDelta := soldQty * (fillPrice - int64(pos.AvgCost))
-			pos.RealizedPnL += pnlDelta
-			newNetQty := prevNetQty - fillQty
-			pos.NetQty = domain.Qty(newNetQty)
-			if newNetQty == 0 {
-				pos.AvgCost = 0
-			} else if newNetQty < 0 {
-				// Flipped short
-				pos.AvgCost = domain.Price(fillPrice)
-			}
-		}
+		pos.AvgCost = 0
 	}
+	pos.RealizedPnL = realizedPnL
 
 	// 4. Calculate Unrealized PnL against current mark price
 	markPrice := int64(b.markPrices[fill.Symbol])
 	if markPrice == 0 {
-		markPrice = fillPrice
+		markPrice = int64(fill.FillPrice)
 	}
-	currentNet := int64(pos.NetQty)
-	if currentNet > 0 {
-		pos.UnrealizedPnL = currentNet * (markPrice - int64(pos.AvgCost))
-	} else if currentNet < 0 {
-		pos.UnrealizedPnL = (-currentNet) * (int64(pos.AvgCost) - markPrice)
+	if netQty > 0 {
+		pos.UnrealizedPnL = netQty * (markPrice - int64(pos.AvgCost))
+	} else if netQty < 0 {
+		pos.UnrealizedPnL = (-netQty) * (int64(pos.AvgCost) - markPrice)
 	} else {
 		pos.UnrealizedPnL = 0
 	}
-	pos.UpdatedAt = time.Now().UTC()
 
-	if err := b.repo.SavePosition(ctx, *pos); err != nil {
+	if err := b.repo.SavePosition(ctx, pos); err != nil {
 		return false, fmt.Errorf("failed to save position: %w", err)
 	}
 
