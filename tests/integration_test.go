@@ -201,9 +201,21 @@ func TestRealOutboxDrain(t *testing.T) {
 	msgBus := bus.NewMemoryBus()
 	defer msgBus.Close()
 
+	// Drain any existing outbox rows from prior tests
+	for {
+		unpub, _ := repo.GetUnpublishedOutbox(ctx, 500)
+		if len(unpub) == 0 {
+			break
+		}
+		for _, u := range unpub {
+			_ = repo.MarkOutboxPublished(ctx, u.OutboxID)
+		}
+	}
+
+	runID := time.Now().UnixNano()
 	// Stage 5 orders in PostgreSQL transaction with Outbox
 	for i := 1; i <= 5; i++ {
-		orderID := fmt.Sprintf("REAL-ORD-%03d", i)
+		orderID := fmt.Sprintf("REAL-ORD-%d-%03d", runID, i)
 		event := storage.OrderEventRecord{
 			OrderID:   orderID,
 			Seq:       1,
@@ -264,9 +276,12 @@ func TestRealIdempotency(t *testing.T) {
 	const numUniqueFills = 50
 	const duplicateMultiplier = 3 // Every fill injected 3 times
 
+	runID := time.Now().UnixNano()
+	account := fmt.Sprintf("REAL_CHAOS_%d", runID)
+
 	// Register parent orders in PostgreSQL
 	for i := 1; i <= numUniqueFills; i++ {
-		orderID := fmt.Sprintf("REAL-CHAOS-ORD-%04d", i)
+		orderID := fmt.Sprintf("CHAOS-ORD-%d-%04d", runID, i)
 		err := repo.SaveOrderEventAndProject(ctx, storage.OrderEventRecord{
 			OrderID:   orderID,
 			Seq:       1,
@@ -276,7 +291,7 @@ func TestRealIdempotency(t *testing.T) {
 		}, storage.OrderRecord{
 			OrderID:   orderID,
 			ClOrdID:   "CL-" + orderID,
-			Account:   "REAL_CHAOS_ACCT",
+			Account:   account,
 			Symbol:    "AAPL",
 			Side:      domain.SideBuy,
 			OrderQty:  1000,
@@ -301,9 +316,9 @@ func TestRealIdempotency(t *testing.T) {
 
 		uniqueFills = append(uniqueFills, events.ExecutionFillPayload{
 			Venue:        "SIM_VENUE",
-			ExecID:       fmt.Sprintf("REAL-EXEC-%04d", i),
-			OrderID:      fmt.Sprintf("REAL-CHAOS-ORD-%04d", i),
-			Account:      "REAL_CHAOS_ACCT",
+			ExecID:       fmt.Sprintf("REAL-EXEC-%d-%04d", runID, i),
+			OrderID:      fmt.Sprintf("CHAOS-ORD-%d-%04d", runID, i),
+			Account:      account,
 			Symbol:       "AAPL",
 			Side:         domain.SideBuy,
 			FillQty:      domain.Qty(fillQty),
@@ -346,7 +361,7 @@ func TestRealIdempotency(t *testing.T) {
 		t.Fatalf("expected %d duplicate fills filtered, got %d", expectedDuplicates, duplicatesFilteredCount)
 	}
 
-	pos, err := repo.GetPosition(ctx, "REAL_CHAOS_ACCT", "AAPL")
+	pos, err := repo.GetPosition(ctx, account, "AAPL")
 	if err != nil {
 		t.Fatalf("failed to retrieve position: %v", err)
 	}
@@ -354,7 +369,7 @@ func TestRealIdempotency(t *testing.T) {
 		t.Fatalf("DATA INTEGRITY BREACH IN POSTGRES: expected final NetQty=%d, got %d", expectedNetQty, pos.NetQty)
 	}
 
-	trades, _ := repo.GetTrades(ctx, "REAL_CHAOS_ACCT", "AAPL")
+	trades, _ := repo.GetTrades(ctx, account, "AAPL")
 	if len(trades) != numUniqueFills {
 		t.Fatalf("expected %d trades in postgres, got %d", numUniqueFills, len(trades))
 	}
